@@ -10,12 +10,14 @@ class KalmanGPSVelocity:
         accel_sigma: float = 1.50,
         speed_sigma: float = 0.15,
         initial_speed_sigma: float = 2.0,
+        gps_rejection_threshold: float = 5.0,
     ) -> None:
         for name, value in (
             ('gps_sigma', gps_sigma),
             ('accel_sigma', accel_sigma),
             ('speed_sigma', speed_sigma),
             ('initial_speed_sigma', initial_speed_sigma),
+            ('gps_rejection_threshold', gps_rejection_threshold),
         ):
             if not math.isfinite(value) or not 1e-150 <= value <= 1e150:
                 raise ValueError(f'{name} must be positive and numerically safe')
@@ -23,11 +25,13 @@ class KalmanGPSVelocity:
         self.accel_sigma = float(accel_sigma)
         self.speed_sigma = float(speed_sigma)
         self.initial_speed_sigma = float(initial_speed_sigma)
+        self.gps_rejection_threshold = float(gps_rejection_threshold)
         self.reset()
 
     def reset(self) -> None:
         self.state: Optional[np.ndarray] = None 
-        self.covariance: Optional[np.ndarray] = None 
+        self.covariance: Optional[np.ndarray] = None
+        self.last_gps_distance: Optional[float] = None
 
     @staticmethod
     def validated_xyz(values) -> np.ndarray:
@@ -99,8 +103,19 @@ class KalmanGPSVelocity:
                 corrected_covariance + corrected_covariance.T
             )
 
-    def update_gps(self, gps_xyz) -> None:
-        self._correct(gps_xyz, np.array([1.0, 0.0]), self.gps_sigma)
+    def update_gps(self, gps_xyz) -> bool:
+        if not self.initialized:
+            raise RuntimeError('Filter has not been initialized')
+        observation = self.validated_xyz(gps_xyz)
+        residual = observation - self.position
+        variance = self.covariance[:, 0, 0] + self.gps_sigma**2
+        # Check all three axes before any correction: reject the entire sample.
+        distance = float(np.linalg.norm(residual / np.sqrt(variance)))
+        self.last_gps_distance = distance if math.isfinite(distance) else None
+        if not math.isfinite(distance) or distance > self.gps_rejection_threshold:
+            return False
+        self._correct(observation, np.array([1.0, 0.0]), self.gps_sigma)
+        return True
 
     def update_velocity(self, velocity_xyz) -> None:
         self._correct(velocity_xyz, np.array([0.0, 1.0]), self.speed_sigma)

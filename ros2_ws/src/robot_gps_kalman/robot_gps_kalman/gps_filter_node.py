@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import json
 import uuid
 from collections import deque
 import rclpy
@@ -23,6 +24,7 @@ class RobotGPSFilterNode(Node):
         self.declare_parameter('filtered_topic', '/robot/gps_filtered')
         self.declare_parameter('imu_topic', '/imu')
         self.declare_parameter('status_topic', '/robot/status')
+        self.declare_parameter('quality_topic', '/robot/sensor_quality')
         self.declare_parameter('rotated_enter_deg', 110.0)
         self.declare_parameter('rotated_exit_deg', 95.0)
         self.declare_parameter('rotated_hold_sec', 0.30)
@@ -35,6 +37,8 @@ class RobotGPSFilterNode(Node):
         self.declare_parameter('imu_max_age_sec', 0.30)
         self.declare_parameter('motion_max_age_sec', 0.30)
         self.declare_parameter('gps_sigma', 0.60)
+        self.declare_parameter('gps_rejection_threshold', 5.0)
+        self.declare_parameter('imu_quaternion_norm_tolerance', 0.10)
         self.declare_parameter('accel_sigma', 1.50)
         self.declare_parameter('speed_sigma', 0.15)
         self.declare_parameter('max_speed_age_sec', 0.15)
@@ -51,6 +55,7 @@ class RobotGPSFilterNode(Node):
             gps_sigma=float(par('gps_sigma')),
             accel_sigma=float(par('accel_sigma')),
             speed_sigma=float(par('speed_sigma')),
+            gps_rejection_threshold=float(par('gps_rejection_threshold')),
         )
         self.status_estimator = RobotStatusEstimator(StatusConfig(**{
             name: float(par(name)) for name in (
@@ -65,6 +70,9 @@ class RobotGPSFilterNode(Node):
         self.max_time_gap_ns = int(float(par('max_time_gap_sec')) * 1e9)
         if self.max_speed_age_ns <= 0 or self.max_time_gap_ns <= 0:
             raise ValueError('max_speed_age_sec and max_time_gap_sec must be > 0')
+        self.imu_norm_tolerance = float(par('imu_quaternion_norm_tolerance'))
+        if not math.isfinite(self.imu_norm_tolerance) or not 0 < self.imu_norm_tolerance < 1:
+            raise ValueError('imu_quaternion_norm_tolerance must be between 0 and 1')
 
         reliability_name = str(par('input_reliability')).lower()
         if reliability_name not in ('reliable', 'best_effort'):
@@ -87,6 +95,9 @@ class RobotGPSFilterNode(Node):
         self.publisher = self.create_publisher(Vector3, str(par('filtered_topic')), output_qos)
         self.status_publisher = self.create_publisher(
             String, str(par('status_topic')), output_qos
+        )
+        self.quality_publisher = self.create_publisher(
+            String, str(par('quality_topic')), output_qos
         )
         self.gps_sub = self.create_subscription(
             PointStamped, str(par('gps_topic')), self._on_gps, qos
@@ -120,6 +131,7 @@ class RobotGPSFilterNode(Node):
         self.last_imu_message = None
         self.last_imu_stamp_ns = None
         self.last_imu_receive_ns = None
+        self.last_imu_input_ns = None
         self.last_scalar_speed = None
         self.last_scalar_speed_ns = None
         self.raw_gps_window = deque(maxlen=4096)
@@ -133,6 +145,16 @@ class RobotGPSFilterNode(Node):
         self.velocity_update_count = 0
         self.last_published_status = None
         self.published_status_count = 0
+        self.last_clock_ns = None
+        self.pending_clock_messages = deque(maxlen=120)
+        self.clock_wait_dropped = 0
+        self.quality = {
+            name: dict(last_good_ns=None, accepted=0, rejected=0, last_rejection='')
+            for name in ('gps', 'imu')
+        }
+        self.last_quality_states = None
+        # Runs without GPS callbacks; ROS-time timers pause with simulated time.
+        self.quality_timer = self.create_timer(0.10, self._publish_quality)
 
         self.get_logger().info(
             'GPS Kalman online: %s + %s -> %s; '
@@ -150,7 +172,83 @@ class RobotGPSFilterNode(Node):
 
     def _sample_is_fresh(self, stamp_ns: int, max_age_sec: float) -> bool:
         now_ns = self._clock_ns()
-        return stamp_ns > 0 and (now_ns == 0 or abs(now_ns - stamp_ns) <= max_age_sec * 1e9)
+        return (stamp_ns > 0 and now_ns > 0
+                and -50_000_000 <= now_ns-stamp_ns <= max_age_sec * 1e9)
+
+    def _check_clock(self) -> None:
+        now_ns = self._clock_ns()
+        if self.last_clock_ns is not None and now_ns < self.last_clock_ns:
+            self._clear('ROS clock moved backwards (bag loop or reset)')
+        self.last_clock_ns = now_ns
+
+    def _defer_until_clock(self, callback=None, msg=None) -> bool:
+        """Keep stamped samples until ROS time starts, then recheck them in order."""
+        if self._clock_ns() <= 0:
+            if callback is None or not self.get_parameter('use_sim_time').value:
+                return False
+            if len(self.pending_clock_messages) == self.pending_clock_messages.maxlen:
+                if self.clock_wait_dropped == 0:
+                    self.get_logger().warn('Clock wait queue is full; dropping oldest samples')
+                self.clock_wait_dropped += 1
+            self.pending_clock_messages.append((callback, msg))
+            return True
+        # Clear before calling handlers, so each queued message is processed once.
+        pending = list(self.pending_clock_messages)
+        self.pending_clock_messages.clear()
+        for handler, sample in pending:
+            handler(sample)
+        return False
+
+    def _reject(self, sensor: str, reason: str) -> None:
+        quality = self.quality[sensor]
+        quality['rejected'] += 1
+        if quality['last_rejection'] != reason:
+            self.get_logger().warn('Rejected %s sample: %s' % (sensor, reason))
+        quality['last_rejection'] = reason
+
+    def _accept(self, sensor: str, stamp_ns: int) -> None:
+        self.quality[sensor]['last_good_ns'] = stamp_ns
+        self.quality[sensor]['accepted'] += 1
+
+    def _quality_report(self) -> dict:
+        now_ns = self._clock_ns()
+        report = dict(ros_time_ns=now_ns, status_valid=False,
+                      clock_wait_dropped=self.clock_wait_dropped)
+        for name, max_age in (
+                ('gps', self.status_estimator.config.motion_max_age_sec),
+                ('imu', self.status_estimator.config.imu_max_age_sec)):
+            quality = self.quality[name]
+            stamp = quality['last_good_ns']
+            age = None if stamp is None else (now_ns-stamp)*1e-9
+            if now_ns <= 0:
+                state = 'WAITING_CLOCK'
+            elif (name == 'imu' and self.last_imu_input_ns is not None
+                  and self.status_estimator.last_imu_s is None):
+                state = 'INVALID'
+            elif stamp is None:
+                state = 'MISSING'
+            elif -0.05 <= age <= max_age:
+                state = 'OK'
+            else:
+                state = 'STALE'
+            report[name] = dict(state=state, age_sec=age,
+                                accepted=quality['accepted'], rejected=quality['rejected'],
+                                last_rejection=quality['last_rejection'])
+        report['gps']['innovation_distance'] = self.filter.last_gps_distance
+        report['status_valid'] = self.status_estimator.current_status(now_ns*1e-9) is not None
+        return report
+
+    def _publish_quality(self) -> None:
+        self._check_clock()
+        self._defer_until_clock()
+        report = self._quality_report()
+        states = (report['gps']['state'], report['imu']['state'])
+        if states != self.last_quality_states:
+            self.get_logger().info('Sensor quality: GPS=%s, IMU=%s' % states)
+            self.last_quality_states = states
+        if not report['status_valid']:
+            self.last_published_status = None
+        self.quality_publisher.publish(String(data=json.dumps(report, allow_nan=False)))
 
     def _clear(self, why: str) -> None:
         self.filter.reset()
@@ -166,9 +264,13 @@ class RobotGPSFilterNode(Node):
         self.last_imu_message = None
         self.last_imu_stamp_ns = None
         self.last_imu_receive_ns = None
+        self.last_imu_input_ns = None
         self.last_scalar_speed = None
         self.last_scalar_speed_ns = None
         self.raw_gps_window.clear()
+        self.pending_clock_messages.clear()
+        for quality in self.quality.values():
+            quality['last_good_ns'] = None
         self.get_logger().warn('Reset Kalman and status detector: %s' % why)
 
     def _advance(self, stamp_ns: int) -> bool:
@@ -176,10 +278,6 @@ class RobotGPSFilterNode(Node):
             self.last_filter_time_ns = stamp_ns
             return True
         delta_ns = stamp_ns - self.last_filter_time_ns
-        if delta_ns < -50_000_000:
-            self._clear('ROS time moved backwards (bag loop or reset)')
-            self.last_filter_time_ns = stamp_ns
-            return True
         if delta_ns > self.max_time_gap_ns:
             self._clear('gap in ROS time > max_time_gap_sec')
             self.last_filter_time_ns = stamp_ns
@@ -190,19 +288,34 @@ class RobotGPSFilterNode(Node):
         return False
 
     def _on_imu(self, msg: Imu) -> None:
+        self._check_clock()
+        if self._defer_until_clock(self._on_imu, msg):
+            return
         q = msg.orientation
         stamp_ns = (int(msg.header.stamp.sec) * 1_000_000_000
                     + int(msg.header.stamp.nanosec))
-        stamp_ns = stamp_ns if stamp_ns > 0 else self._clock_ns()
         if not self._sample_is_fresh(
                 stamp_ns, self.status_estimator.config.imu_max_age_sec):
+            self._reject('imu', 'invalid, stale or future timestamp')
             return
+        if self.last_imu_input_ns is not None and stamp_ns <= self.last_imu_input_ns:
+            self._reject('imu', 'duplicate or out-of-order timestamp')
+            return
+        self.last_imu_input_ns = stamp_ns
         try:
             if msg.orientation_covariance[0] == -1:
                 raise ValueError('IMU orientation is unavailable')
+            covariance = msg.orientation_covariance
+            if (not all(math.isfinite(v) for v in covariance)
+                    or any(covariance[i] < 0 for i in (0, 4, 8))):
+                raise ValueError('Invalid IMU orientation covariance')
+            norm = math.hypot(q.x, q.y, q.z, q.w)
+            if not math.isfinite(norm) or abs(norm-1.0) > self.imu_norm_tolerance:
+                raise ValueError('IMU quaternion norm is not close to 1')
             self.status_estimator.update_imu(
                 (q.x, q.y, q.z, q.w), stamp_ns * 1e-9
             )
+            self._accept('imu', stamp_ns)
             if (self.recorder is not None
                     and self.status_estimator.last_imu_s == stamp_ns * 1e-9):
                 self.last_imu_message = msg
@@ -213,15 +326,21 @@ class RobotGPSFilterNode(Node):
             self.last_imu_message = None
             self.last_imu_stamp_ns = None
             self.last_imu_receive_ns = None
-            self.get_logger().warn('Skipped IMU orientation: %s' % exc)
+            self._reject('imu', str(exc))
 
     def _on_speed(self, msg: Float32) -> None:
+        self._check_clock()
+        self._defer_until_clock()
+        if self._clock_ns() <= 0:
+            return
         value = float(msg.data)
         if math.isfinite(value):
             self.last_scalar_speed = value
             self.last_scalar_speed_ns = self._clock_ns()
 
     def _on_velocity(self, msg: Vector3) -> None:
+        self._check_clock()
+        self._defer_until_clock()
         try:
             xyz = self.filter.validated_xyz((msg.x, msg.y, msg.z))
         except ValueError as exc:
@@ -235,8 +354,12 @@ class RobotGPSFilterNode(Node):
         self.velocity_seq += 1
 
     def _on_gps_vector(self, msg: Vector3) -> None:
+        self._check_clock()
+        self._defer_until_clock()
         converted = PointStamped()
         stamp_ns = self._clock_ns()
+        if stamp_ns <= 0:
+            return
         sec, nanosec = divmod(stamp_ns, 1_000_000_000)
         converted.header.stamp.sec = sec
         converted.header.stamp.nanosec = nanosec
@@ -244,17 +367,22 @@ class RobotGPSFilterNode(Node):
         self._on_gps(converted)
 
     def _on_gps(self, msg: PointStamped) -> None:
+        self._check_clock()
+        if self._defer_until_clock(self._on_gps, msg):
+            return
         try:
             gps = self.filter.validated_xyz((msg.point.x, msg.point.y, msg.point.z))
         except ValueError as exc:
-            self.get_logger().warn('Skipped GPS: %s' % exc)
+            self._reject('gps', str(exc))
             return
         header_stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
-        stamp_ns = header_stamp_ns if header_stamp_ns > 0 else self._clock_ns()
+        stamp_ns = header_stamp_ns
         if not self._sample_is_fresh(
                 stamp_ns, self.status_estimator.config.motion_max_age_sec):
+            self._reject('gps', 'invalid, stale or future timestamp')
             return
-        if (self.last_filter_time_ns is not None and -50_000_000 <= stamp_ns - self.last_filter_time_ns <= 0):
+        if self.last_filter_time_ns is not None and stamp_ns <= self.last_filter_time_ns:
+            self._reject('gps', 'duplicate or out-of-order timestamp')
             return
         self._advance(stamp_ns)
         if self.segment_start_ns is None:
@@ -274,11 +402,16 @@ class RobotGPSFilterNode(Node):
                 self.last_applied_velocity_seq = self.velocity_seq
                 self.velocity_update_count += 1
         else:
-            self.filter.update_gps(gps)
+            accepted = self.filter.update_gps(gps)
             if fresh_velocity is not None:
                 self.filter.update_velocity(fresh_velocity)
                 self.last_applied_velocity_seq = self.velocity_seq
                 self.velocity_update_count += 1
+            if not accepted:
+                self._reject('gps', 'innovation exceeds gps_rejection_threshold')
+                return
+
+        self._accept('gps', stamp_ns)
 
         filtered = self.filter.position
         velocity = self.filter.velocity
