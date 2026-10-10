@@ -153,7 +153,6 @@ class RobotGPSFilterNode(Node):
             for name in ('gps', 'imu')
         }
         self.last_quality_states = None
-        # Runs without GPS callbacks; ROS-time timers pause with simulated time.
         self.quality_timer = self.create_timer(0.10, self._publish_quality)
 
         self.get_logger().info(

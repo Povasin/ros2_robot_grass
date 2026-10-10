@@ -1,0 +1,4 @@
+﻿scenario,run_id,segment_id,gps_rows,expected_gps_rows,gps_coverage_pct,recorded_duration_sec,valid_status_rows,status_valid_pct,driving_rows,stuck_rows,rotated_rows,first_target_sec,imu_tilt_first_ge110_sec,rotation_detection_lag_sec,stop_speed_sustained_start_sec,stop_detection_lag_sec,max_tilt_deg,missing_imu_snapshots,missing_speed_vector_snapshots,imu_age_abs_p95_ms,speed_vector_age_abs_p95_ms,backward_gps_header_timestamps,duplicate_gps_header_timestamps,rotated_with_tilt_lt95_rows,scenario_sanity
+rosbag2_езда,5ac24e3ec94d,0,1193,1193,100.0,12.459,1191,99.83,1191,0,0,0.027201,,,,,71.995,2,1,9.82,22.5,0,0,0,PASS
+rosbag2_застрял,5a5a5144fc0c,0,874,874,100.0,9.106,871,99.66,369,502,0,3.868487,,,3.068052,0.8,26.294,3,1,9.58,22.98,0,0,0,PASS
+rosbag2_перевернулся,832abe96abdf,0,563,563,100.0,5.872,559,99.29,253,0,306,2.662537,2.353836,0.309,3.003536,,157.45,4,2,10.15,22.73,0,0,0,PASS

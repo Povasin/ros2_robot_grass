@@ -109,7 +109,6 @@ class KalmanGPSVelocity:
         observation = self.validated_xyz(gps_xyz)
         residual = observation - self.position
         variance = self.covariance[:, 0, 0] + self.gps_sigma**2
-        # Check all three axes before any correction: reject the entire sample.
         distance = float(np.linalg.norm(residual / np.sqrt(variance)))
         self.last_gps_distance = distance if math.isfinite(distance) else None
         if not math.isfinite(distance) or distance > self.gps_rejection_threshold:

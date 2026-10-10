@@ -1,0 +1,7 @@
+Live CSV rows: 2630 groups: 3
+  rosbag2_езда: 1193/1193 GPS, valid=99.83%, target=0.027201, result=PASS
+  rosbag2_застрял: 874/874 GPS, valid=99.66%, target=3.868487, result=PASS
+  rosbag2_перевернулся: 563/563 GPS, valid=99.29%, target=2.662537, result=PASS
+Warnings: 0
+Metrics: /mnt/c/Users/User/Desktop/roboticks-testovoe/validation_runs/20261011_012408_2492/scenario_metrics.csv
+Events: /mnt/c/Users/User/Desktop/roboticks-testovoe/validation_runs/20261011_012408_2492/status_transitions.csv

@@ -28,7 +28,6 @@ env/
 *.db3-shm
 *.db3-wal
 
-/validation_runs/
 /robot_validation_plots/
 /gps_filter_results/
 /robot_status_preview/

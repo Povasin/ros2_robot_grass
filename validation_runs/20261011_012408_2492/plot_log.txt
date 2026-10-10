@@ -1,0 +1,23 @@
+CSV: /mnt/c/Users/User/Desktop/roboticks-testovoe/validation_runs/20261011_012408_2492/robot_telemetry_live_all.csv | total rows: 2630 | scenario/segment groups: 3
+
+rosbag2_езда | run=5ac24e3ec94d | segment=0 | samples=1193
+  Time: 0.000 .. 12.459 s
+  Counts: {'AWAITING_DATA': 2, 'ROBOT DRIVING': 1191}
+  Transitions: 0.027s → ROBOT DRIVING
+  Missing IMU/velocity snapshots: 2/1; backward-timestamp rows: 0
+  Saved: rosbag2_езда_segment_5ac24e3ec94d_0_overview.png, rosbag2_езда_segment_5ac24e3ec94d_0_xy.png
+
+rosbag2_застрял | run=5a5a5144fc0c | segment=0 | samples=874
+  Time: 0.000 .. 9.106 s
+  Counts: {'AWAITING_DATA': 3, 'ROBOT DRIVING': 369, 'MOVEMENT_ON_PLACE': 502}
+  Transitions: 0.033s → ROBOT DRIVING; 3.868s → MOVEMENT_ON_PLACE
+  Missing IMU/velocity snapshots: 3/1; backward-timestamp rows: 0
+  Saved: rosbag2_застрял_segment_5a5a5144fc0c_0_overview.png, rosbag2_застрял_segment_5a5a5144fc0c_0_xy.png
+
+rosbag2_перевернулся | run=832abe96abdf | segment=0 | samples=563
+  Time: 0.000 .. 5.872 s
+  Counts: {'AWAITING_DATA': 4, 'ROBOT DRIVING': 253, 'ROTATED': 306}
+  Transitions: 0.038s → ROBOT DRIVING; 2.663s → ROTATED
+  Missing IMU/velocity snapshots: 4/2; backward-timestamp rows: 0
+  Saved: rosbag2_перевернулся_segment_832abe96abdf_0_overview.png, rosbag2_перевернулся_segment_832abe96abdf_0_xy.png
+Saved side-by-side plot: /mnt/c/Users/User/Desktop/roboticks-testovoe/validation_runs/20261011_012408_2492/plots/all_scenarios_comparison.png
